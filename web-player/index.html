@@ -1,0 +1,402 @@
+html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Signage Player</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: Arial, sans-serif; }
+    
+    /* PAIRING SCREEN */
+    #pairing-screen {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      z-index: 100;
+    }
+    #pairing-screen.hidden { display: none; }
+    .pairing-title { color: #fff; font-size: 2rem; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 4px; }
+    .pairing-code { color: #00ff88; font-size: 8rem; font-weight: bold; letter-spacing: 20px; text-shadow: 0 0 40px rgba(0, 255, 136, 0.5); }
+    .pairing-subtitle { color: #888; font-size: 1.2rem; margin-top: 2rem; }
+    
+    /* PLAYER SCREEN */
+    #player-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #000; display: none; }
+    #player-screen.active { display: block; }
+    #media-container { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+    #media-container img, #media-container video { max-width: 100%; max-height: 100%; object-fit: contain; }
+    
+    /* OFFLINE INDICATOR */
+    #offline-indicator {
+      position: fixed; top: 20px; right: 20px;
+      background: rgba(255, 0, 0, 0.8); color: white;
+      padding: 10px 20px; border-radius: 5px; font-size: 14px; display: none; z-index: 50;
+    }
+    #offline-indicator.visible { display: block; }
+  </style>
+</head>
+<body>
+  <!-- PAIRING SCREEN -->
+  <div id="pairing-screen">
+    <div class="pairing-title">Pairing Code</div>
+    <div class="pairing-code" id="pairing-code-display">------</div>
+    <div class="pairing-subtitle">Enter this code in the admin dashboard</div>
+  </div>
+
+  <!-- PLAYER SCREEN -->
+  <div id="player-screen">
+    <div id="media-container"></div>
+  </div>
+
+  <!-- OFFLINE INDICATOR -->
+  <div id="offline-indicator">OFFLINE - Playing cached content</div>
+
+  <script>
+    // ==================== CONFIG ====================
+    // Use dynamic server detection - gets the host from current page
+    const getApiBase = () => {
+      const currentHost = window.location.hostname;
+      const currentPort = window.location.port;
+      // Use the same host but different port for API (server runs on 5002)
+      return `http://${currentHost}:5002/api/signage`;
+    };
+    
+    const API_BASE = getApiBase(); // Auto-detect server address
+    // OR uncomment below and set manually:
+    // const API_BASE = 'http://localhost:5002/api/signage';
+    // const API_BASE = 'http://192.168.1.6:5002/api/signage';
+    
+    console.log('API Base URL:', API_BASE);
+    
+    const POLL_INTERVAL = 30000; // 30 seconds
+    const CACHE_KEY = 'signage_cache';
+    const DEVICE_ID_KEY = 'signage_device_id';
+    const MEDIA_CACHE_KEY = 'signage_media_cache';
+    const OFFLINE_THRESHOLD = 3; // Show offline after 3 consecutive failures
+    
+    // ==================== STATE ====================
+    let deviceId = null;
+    let currentPlaylist = [];
+    let currentIndex = 0;
+    let isPlaying = false;
+    let pollTimer = null;
+    let mediaTimer = null;
+    let isOnline = true;
+    let consecutiveFailures = 0;
+    let cachedMediaUrls = {}; // Store cached media URLs
+    
+    // ==================== INIT ====================
+    async function init() {
+      // Load cached media URLs
+      loadMediaCache();
+      
+      deviceId = localStorage.getItem(DEVICE_ID_KEY);
+      if (deviceId) {
+        await pollBackend();
+      } else {
+        await registerDevice();
+      }
+      startPolling();
+    }
+    
+    // ==================== DEVICE REGISTRATION ====================
+    async function registerDevice() {
+      try {
+        const response = await fetch(`${API_BASE}/tv/register`, { method: 'GET' });
+        const data = await response.json();
+        if (data.success && data.data) {
+          // Store both deviceId and pairing code
+          deviceId = data.data.deviceId;
+          localStorage.setItem(DEVICE_ID_KEY, deviceId);
+          
+          // If we have a code, show pairing screen
+          if (data.data.code) {
+            showPairingScreen(data.data.code);
+          } else {
+            // Already paired, start polling
+            startPolling();
+          }
+        } else {
+          setTimeout(registerDevice, 5000);
+        }
+      } catch (error) {
+        console.error('Registration error:', error);
+        setTimeout(registerDevice, 5000);
+      }
+    }
+    
+    // ==================== PAIRING SCREEN ====================
+    function showPairingScreen(code) {
+      document.getElementById('pairing-screen').classList.remove('hidden');
+      document.getElementById('player-screen').classList.remove('active');
+      document.getElementById('pairing-code-display').textContent = code;
+    }
+    
+    // ==================== POLLING ====================
+    function startPolling() {
+      pollTimer = setInterval(pollBackend, POLL_INTERVAL);
+      pollBackend();
+    }
+    
+    async function pollBackend() {
+      if (!deviceId) return;
+      
+      try {
+        const response = await fetch(`${API_BASE}/tv/poll`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: deviceId, mediaHashes: {} })
+        });
+        
+        const data = await response.json();
+        
+        // Reset failure counter on successful response
+        consecutiveFailures = 0;
+        
+        // Handle API response - check both success flag and nested data
+        const pollData = data.success ? (data.data || data) : data;
+        
+        if (!data.success) {
+          if (pollData.message === 'DEVICE_NOT_FOUND' || pollData.message === 'NOT_PAIRED') {
+            // Device not found or not paired - clear localStorage and re-register
+            localStorage.removeItem(DEVICE_ID_KEY);
+            localStorage.removeItem(CACHE_KEY);
+            deviceId = null;
+            await registerDevice();
+            return;
+          }
+          // Other error - try again later
+          console.error('Poll error:', pollData.message);
+          return;
+        }
+        
+        setOnline(true);
+        
+        // Check if device is paired
+        if (pollData.paired === false) {
+          // Show pairing screen with code
+          if (pollData.code) {
+            showPairingScreen(pollData.code);
+          }
+          return;
+        }
+        
+        // Device is paired and has playlist
+        if (pollData.playlist && pollData.playlist.items && pollData.playlist.items.length > 0) {
+          // Pre-cache media files
+          preCacheMedia(pollData.playlist.items);
+          
+          currentPlaylist = pollData.playlist.items;
+          currentIndex = 0;
+          cachePlaylist(pollData.playlist);
+          if (!isPlaying) startPlayback();
+        }
+        
+      } catch (error) {
+        console.error('Poll network error:', error);
+        consecutiveFailures++;
+        if (consecutiveFailures >= OFFLINE_THRESHOLD) {
+          setOnline(false);
+        }
+      }
+    }
+    
+    // ==================== CACHE ====================
+    function getCache() {
+      try { return JSON.parse(localStorage.getItem(CACHE_KEY)) || { playlist: null }; }
+      catch { return { playlist: null }; }
+    }
+    
+    function saveCache(cache) {
+      localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
+    }
+    
+    function cachePlaylist(playlist) {
+      const cache = getCache();
+      cache.playlist = playlist;
+      cache.lastUpdated = new Date().toISOString();
+      saveCache(cache);
+    }
+    
+    // ==================== MEDIA CACHE ====================
+    function loadMediaCache() {
+      try {
+        const cached = localStorage.getItem(MEDIA_CACHE_KEY);
+        if (cached) {
+          cachedMediaUrls = JSON.parse(cached);
+          console.log('Loaded media cache:', Object.keys(cachedMediaUrls).length, 'files');
+        }
+      } catch (e) {
+        cachedMediaUrls = {};
+      }
+    }
+    
+    function saveMediaCache() {
+      localStorage.setItem(MEDIA_CACHE_KEY, JSON.stringify(cachedMediaUrls));
+    }
+    
+    function preCacheMedia(items) {
+      const baseUrl = API_BASE.replace('/api/signage', '');
+      
+      items.forEach((item, index) => {
+        if (!item.media) return;
+        
+        let mediaUrl = item.media.fileUrl || '';
+        if (!mediaUrl.startsWith('http')) {
+          mediaUrl = baseUrl + mediaUrl;
+        }
+        
+        // Skip if already cached
+        if (cachedMediaUrls[item.media._id]) {
+          return;
+        }
+        
+        // Pre-load image in background
+        const img = new Image();
+        img.src = mediaUrl;
+        img.onload = () => {
+          console.log('Pre-cached:', item.media.fileName);
+          cachedMediaUrls[item.media._id] = {
+            url: mediaUrl,
+            fileName: item.media.fileName,
+            type: item.media.type,
+            cachedAt: new Date().toISOString()
+          };
+          saveMediaCache();
+        };
+        img.onerror = () => {
+          console.log('Failed to cache:', item.media.fileName);
+        };
+      });
+    }
+    
+    function getCachedMediaUrl(mediaId) {
+      return cachedMediaUrls[mediaId]?.url || null;
+    }
+    
+    // ==================== PLAYBACK ====================
+    function startPlayback() {
+      if (currentPlaylist.length === 0) {
+        const cache = getCache();
+        if (cache.playlist && cache.playlist.items) currentPlaylist = cache.playlist.items;
+      }
+      
+      if (currentPlaylist.length === 0) {
+        setTimeout(startPlayback, 2000);
+        return;
+      }
+      
+      isPlaying = true;
+      document.getElementById('pairing-screen').classList.add('hidden');
+      document.getElementById('player-screen').classList.add('active');
+      playCurrentItem();
+    }
+    
+    function playCurrentItem() {
+      if (!isPlaying || currentPlaylist.length === 0) return;
+      
+      const item = currentPlaylist[currentIndex];
+      if (!item || !item.media) { 
+        console.log('No item or media found, skipping');
+        nextItem(); 
+        return; 
+      }
+      
+      const container = document.getElementById('media-container');
+      const playerScreen = document.getElementById('player-screen');
+      
+      console.log('Player screen active:', playerScreen.classList.contains('active'));
+      console.log('Container innerHTML before:', container.innerHTML);
+      
+      container.innerHTML = '';
+      
+      // Try to use cached URL first
+      let mediaUrl = getCachedMediaUrl(item.media._id);
+      
+      // Fall back to live URL
+      if (!mediaUrl) {
+        mediaUrl = item.media.fileUrl || '';
+        if (!mediaUrl.startsWith('http')) {
+          const baseUrl = API_BASE.replace('/api/signage', '');
+          mediaUrl = baseUrl + mediaUrl;
+        }
+      }
+      
+      console.log('Loading media:', mediaUrl);
+      console.log('Media type:', item.media.type);
+      
+      const duration = item.duration || 10;
+      
+      if (item.media.type === 'video') {
+        const video = document.createElement('video');
+        video.src = mediaUrl;
+        video.autoplay = true;
+        video.muted = true;
+        video.loop = false;
+        video.onended = () => {
+          console.log('Video ended');
+          nextItem();
+        };
+        video.onerror = (e) => {
+          console.error('Video error:', e);
+          nextItem();
+        };
+        container.appendChild(video);
+      } else {
+        const img = document.createElement('img');
+        img.src = mediaUrl;
+        img.style.maxWidth = '100%';
+        img.style.maxHeight = '100%';
+        img.style.objectFit = 'contain';
+        img.onload = () => {
+          console.log('Image loaded successfully');
+          console.log('Image dimensions:', img.width, 'x', img.height);
+          console.log('Container innerHTML after:', container.innerHTML);
+        };
+        img.onerror = (e) => {
+          console.error('Image load error:', e);
+          // Remove from cache and try again with live URL
+          delete cachedMediaUrls[item.media._id];
+          saveMediaCache();
+          
+          // Try with live URL directly
+          let liveUrl = item.media.fileUrl || '';
+          if (!liveUrl.startsWith('http')) {
+            const baseUrl = API_BASE.replace('/api/signage', '');
+            liveUrl = baseUrl + liveUrl;
+          }
+          img.src = liveUrl;
+          img.onerror = () => {
+            // Show error in container for debugging
+            container.innerHTML = `<div style="color: red; text-align: center;">Failed to load: ${mediaUrl}</div>`;
+            setTimeout(() => nextItem(), 2000);
+          };
+        };
+        container.appendChild(img);
+        mediaTimer = setTimeout(() => nextItem(), duration * 1000);
+      }
+    }
+    
+    function nextItem() {
+      if (mediaTimer) { clearTimeout(mediaTimer); mediaTimer = null; }
+      currentIndex++;
+      if (currentIndex >= currentPlaylist.length) currentIndex = 0;
+      playCurrentItem();
+    }
+    
+    // ==================== NETWORK STATUS ====================
+    function setOnline(online) {
+      isOnline = online;
+      document.getElementById('offline-indicator').classList.toggle('visible', !online);
+    }
+    
+    // ==================== START ====================
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
+  </script>
+</body>
+</html>
