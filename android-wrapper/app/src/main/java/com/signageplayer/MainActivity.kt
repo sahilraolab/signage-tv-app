@@ -14,7 +14,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     
     // CHANGE THIS to your server URL
-    private val PLAYER_URL = "https://your-domain.com/signage-player"
+    private val PLAYER_URL = "https://signage.techseventeen.com"
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
