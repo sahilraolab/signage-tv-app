@@ -92,9 +92,12 @@ html
       loadMediaCache();
       
       deviceId = localStorage.getItem(DEVICE_ID_KEY);
+      
+      // First, check if device is already paired by polling
       if (deviceId) {
         await pollBackend();
       } else {
+        // No deviceId, register new device
         await registerDevice();
       }
       startPolling();
@@ -163,6 +166,9 @@ html
             localStorage.removeItem(DEVICE_ID_KEY);
             localStorage.removeItem(CACHE_KEY);
             deviceId = null;
+            // Show pairing screen
+            document.getElementById('pairing-screen').classList.remove('hidden');
+            document.getElementById('player-screen').classList.remove('active');
             await registerDevice();
             return;
           }
@@ -173,14 +179,19 @@ html
         
         setOnline(true);
         
-        // Check if device is paired
+        // Check if device is paired - this is the key check for existing deviceId
         if (pollData.paired === false) {
-          // Show pairing screen with code
+          // Device is registered but not paired - show pairing screen with code
+          document.getElementById('pairing-screen').classList.remove('hidden');
+          document.getElementById('player-screen').classList.remove('active');
           if (pollData.code) {
             showPairingScreen(pollData.code);
           }
           return;
         }
+        
+        // Device is paired - hide pairing screen and show player
+        document.getElementById('pairing-screen').classList.add('hidden');
         
         // Device is paired and has playlist
         if (pollData.playlist && pollData.playlist.items && pollData.playlist.items.length > 0) {
@@ -191,6 +202,10 @@ html
           currentIndex = 0;
           cachePlaylist(pollData.playlist);
           if (!isPlaying) startPlayback();
+        } else {
+          // Paired but no playlist assigned - show message
+          document.getElementById('player-screen').classList.add('active');
+          document.getElementById('media-container').innerHTML = '<div style="color: #888; text-align: center;">No playlist assigned<br>Please assign a playlist in admin dashboard</div>';
         }
         
       } catch (error) {
