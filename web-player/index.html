@@ -54,18 +54,10 @@ html
 
   <script>
     // ==================== CONFIG ====================
-    // Use dynamic server detection - gets the host from current page
-    const getApiBase = () => {
-      const currentHost = window.location.hostname;
-      const currentPort = window.location.port;
-      // Use the same host but different port for API (server runs on 5002)
-      return `http://${currentHost}:5002/api/signage`;
-    };
-    
-    const API_BASE = getApiBase(); // Auto-detect server address
-    // OR uncomment below and set manually:
-    // const API_BASE = 'http://localhost:5002/api/signage';
-    // const API_BASE = 'http://192.168.1.6:5002/api/signage';
+    // Same-origin: the server serves this HTML file, so protocol+host already match the API.
+    const getApiBase = () => `${window.location.protocol}//${window.location.host}/api/signage`;
+
+    const API_BASE = getApiBase();
     
     console.log('API Base URL:', API_BASE);
     
