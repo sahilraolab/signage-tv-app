@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- TV screen body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,25 Q20,20 25,20 L83,20 Q88,20 88,25 L88,68 Q88,73 83,73 L25,73 Q20,73 20,68 Z" />
+
+    <!-- Screen inner (dark display area) -->
+    <path
+        android:fillColor="#DF6229"
+        android:pathData="M26,27 L82,27 L82,66 L26,66 Z" />
+
+    <!-- Play / signal icon on screen -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M46,38 L46,55 L62,46.5 Z" />
+
+    <!-- TV stand -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M47,73 L43,83 L65,83 L61,73 Z" />
+
+    <!-- Stand base -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,83 L70,83 Q71,83 71,84 L71,86 Q71,87 70,87 L38,87 Q37,87 37,86 L37,84 Q37,83 38,83 Z" />
+</vector>
