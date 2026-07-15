@@ -23,7 +23,7 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var isPageLoaded = false
 
-    private val PLAYER_URL = "https://signage.techseventeen.com"
+    private val PLAYER_URL = "https://signage.techseventeen.com/signage-tv"
 
     // Reload the page if nothing loads within 30 seconds
     private val watchdogRunnable = Runnable {
