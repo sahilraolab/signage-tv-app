@@ -76,7 +76,6 @@ html
     const POLL_INTERVAL = 30000; // 30 seconds - default/fallback, server can override per poll
     const CACHE_KEY = 'signage_cache';
     const DEVICE_ID_KEY = 'signage_device_id';
-    const MEDIA_CACHE_KEY = 'signage_media_cache';
     const REFRESH_KEY = 'signage_refreshed_at';
     const OFFLINE_THRESHOLD = 3; // Show offline after 3 consecutive failures
     
@@ -89,13 +88,9 @@ html
     let mediaTimer = null;
     let isOnline = true;
     let consecutiveFailures = 0;
-    let cachedMediaUrls = {}; // Store cached media URLs
-    
+
     // ==================== INIT ====================
     async function init() {
-      // Load cached media URLs
-      loadMediaCache();
-      
       deviceId = localStorage.getItem(DEVICE_ID_KEY);
       
       // First, check if device is already paired by polling
@@ -273,59 +268,101 @@ html
     }
     
     // ==================== MEDIA CACHE ====================
-    function loadMediaCache() {
+    // Real offline storage: actual image/video bytes are fetched once and kept as a
+    // Blob in IndexedDB (not just a re-reference to the same network URL, which is
+    // what silently never provided any offline capability before, and only ever
+    // touched images — video was never pre-cached at all). IndexedDB (not the Cache
+    // API/Service Worker) because a Service Worker requires HTTPS except on
+    // localhost, and this player is typically reached over a plain-HTTP LAN address.
+    const MEDIA_DB_NAME = 'signage_media_store';
+    const MEDIA_STORE = 'media';
+    let mediaDbPromise = null;
+    let currentObjectUrl = null; // revoked before the next one is created, to avoid leaking memory over long uptimes
+
+    function openMediaDB() {
+      if (mediaDbPromise) return mediaDbPromise;
+      mediaDbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(MEDIA_DB_NAME, 1);
+        req.onupgradeneeded = () => {
+          req.result.createObjectStore(MEDIA_STORE, { keyPath: 'mediaId' });
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      return mediaDbPromise;
+    }
+
+    async function getCachedEntry(mediaId) {
       try {
-        const cached = localStorage.getItem(MEDIA_CACHE_KEY);
-        if (cached) {
-          cachedMediaUrls = JSON.parse(cached);
-          console.log('Loaded media cache:', Object.keys(cachedMediaUrls).length, 'files');
-        }
+        const db = await openMediaDB();
+        return await new Promise((resolve, reject) => {
+          const tx = db.transaction(MEDIA_STORE, 'readonly');
+          const req = tx.objectStore(MEDIA_STORE).get(mediaId);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => reject(req.error);
+        });
       } catch (e) {
-        cachedMediaUrls = {};
+        return null;
       }
     }
-    
-    function saveMediaCache() {
-      localStorage.setItem(MEDIA_CACHE_KEY, JSON.stringify(cachedMediaUrls));
-    }
-    
-    function preCacheMedia(items) {
-      const baseUrl = API_BASE.replace('/api/signage', '');
-      
-      items.forEach((item, index) => {
-        if (!item.media) return;
-        
-        let mediaUrl = item.media.fileUrl || '';
-        if (!mediaUrl.startsWith('http')) {
-          mediaUrl = baseUrl + mediaUrl;
-        }
-        
-        // Skip if already cached
-        if (cachedMediaUrls[item.media._id]) {
-          return;
-        }
-        
-        // Pre-load image in background
-        const img = new Image();
-        img.src = mediaUrl;
-        img.onload = () => {
-          console.log('Pre-cached:', item.media.fileName);
-          cachedMediaUrls[item.media._id] = {
-            url: mediaUrl,
-            fileName: item.media.fileName,
-            type: item.media.type,
-            cachedAt: new Date().toISOString()
-          };
-          saveMediaCache();
-        };
-        img.onerror = () => {
-          console.log('Failed to cache:', item.media.fileName);
-        };
+
+    async function putCachedEntry(mediaId, blob, hash) {
+      const db = await openMediaDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(MEDIA_STORE, 'readwrite');
+        tx.objectStore(MEDIA_STORE).put({ mediaId, blob, hash, cachedAt: new Date().toISOString() });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
       });
     }
-    
-    function getCachedMediaUrl(mediaId) {
-      return cachedMediaUrls[mediaId]?.url || null;
+
+    async function deleteCachedEntry(mediaId) {
+      try {
+        const db = await openMediaDB();
+        await new Promise((resolve) => {
+          const tx = db.transaction(MEDIA_STORE, 'readwrite');
+          tx.objectStore(MEDIA_STORE).delete(mediaId);
+          tx.oncomplete = resolve;
+          tx.onerror = resolve;
+        });
+      } catch (e) { /* best-effort */ }
+    }
+
+    function resolveMediaUrl(item) {
+      let mediaUrl = item.media.fileUrl || '';
+      if (!mediaUrl.startsWith('http')) {
+        mediaUrl = API_BASE.replace('/api/signage', '') + mediaUrl;
+      }
+      return mediaUrl;
+    }
+
+    async function preCacheMedia(items) {
+      for (const item of items) {
+        if (!item.media) continue;
+        try {
+          const existing = await getCachedEntry(item.media._id);
+          // Re-fetch if never cached, or if the file changed since (hash mismatch)
+          if (existing && existing.hash === item.media.hash) continue;
+
+          const response = await fetch(resolveMediaUrl(item));
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const blob = await response.blob();
+          await putCachedEntry(item.media._id, blob, item.media.hash);
+          console.log('Pre-cached (offline-ready):', item.media.fileName);
+        } catch (e) {
+          console.log('Failed to cache:', item.media.fileName, e.message);
+        }
+      }
+    }
+
+    // Returns a local blob: URL for offline playback, or null if not cached yet —
+    // callers fall back to the live network URL in that case.
+    async function getCachedMediaObjectUrl(mediaId) {
+      const entry = await getCachedEntry(mediaId);
+      if (!entry) return null;
+      if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+      currentObjectUrl = URL.createObjectURL(entry.blob);
+      return currentObjectUrl;
     }
     
     // ==================== PLAYBACK ====================
@@ -346,55 +383,68 @@ html
       playCurrentItem();
     }
     
-    function playCurrentItem() {
+    async function playCurrentItem() {
       if (!isPlaying || currentPlaylist.length === 0) return;
-      
+
       const item = currentPlaylist[currentIndex];
-      if (!item || !item.media) { 
+      if (!item || !item.media) {
         console.log('No item or media found, skipping');
-        nextItem(); 
-        return; 
+        nextItem();
+        return;
       }
-      
+
       const container = document.getElementById('media-container');
-      const playerScreen = document.getElementById('player-screen');
-      
-      console.log('Player screen active:', playerScreen.classList.contains('active'));
-      console.log('Container innerHTML before:', container.innerHTML);
-      
       container.innerHTML = '';
-      
-      // Try to use cached URL first
-      let mediaUrl = getCachedMediaUrl(item.media._id);
-      
-      // Fall back to live URL
-      if (!mediaUrl) {
-        mediaUrl = item.media.fileUrl || '';
-        if (!mediaUrl.startsWith('http')) {
-          const baseUrl = API_BASE.replace('/api/signage', '');
-          mediaUrl = baseUrl + mediaUrl;
-        }
-      }
-      
-      console.log('Loading media:', mediaUrl);
-      console.log('Media type:', item.media.type);
-      
+
+      // A device navigating between items while offline can't await network — freeze
+      // it back on this same item rather than plow ahead onto a media element that
+      // has no chance of loading either.
+      const playToken = ++playCurrentItem._token;
+
+      // Real offline-first playback: use a locally stored blob if we have one, only
+      // touching the network if nothing's cached yet.
+      const mediaId = item.media._id;
+      let mediaUrl = await getCachedMediaObjectUrl(mediaId);
+      const usingCache = !!mediaUrl;
+      if (!mediaUrl) mediaUrl = resolveMediaUrl(item);
+
+      if (playToken !== playCurrentItem._token) return; // superseded while we were awaiting the cache lookup
+
+      console.log('Loading media:', mediaUrl, usingCache ? '(from offline cache)' : '(live network)');
+
       const duration = item.duration || 10;
-      
+
+      // Rotation set per-media in the admin dashboard — kept in sync with the preview
+      // shown there (a plain CSS rotate, not a full portrait/landscape re-fit).
+      const rotation = item.media.rotation || 0;
+
+      // Shared fallback: a cached blob can be corrupt/partial; if it fails, drop it
+      // and retry once against the live network URL before giving up.
+      const handleLoadError = (el, isVideo) => {
+        if (usingCache) {
+          console.warn('Cached media failed to load, dropping cache entry and retrying live:', item.media.fileName);
+          deleteCachedEntry(mediaId);
+          el.src = resolveMediaUrl(item);
+          el.onerror = () => showLoadFailure(item.media.fileName);
+        } else {
+          showLoadFailure(item.media.fileName);
+        }
+      };
+
+      const showLoadFailure = (fileName) => {
+        container.innerHTML = `<div style="color: red; text-align: center;">Failed to load: ${fileName}</div>`;
+        setTimeout(() => nextItem(), 2000);
+      };
+
       if (item.media.type === 'video') {
         const video = document.createElement('video');
         video.src = mediaUrl;
+        video.style.transform = `rotate(${rotation}deg)`;
         video.autoplay = true;
         video.muted = true;
         video.loop = false;
-        video.onended = () => {
-          console.log('Video ended');
-          nextItem();
-        };
-        video.onerror = (e) => {
-          console.error('Video error:', e);
-          nextItem();
-        };
+        video.onended = () => nextItem();
+        video.onerror = () => handleLoadError(video, true);
         container.appendChild(video);
       } else {
         const img = document.createElement('img');
@@ -402,34 +452,13 @@ html
         img.style.maxWidth = '100%';
         img.style.maxHeight = '100%';
         img.style.objectFit = 'contain';
-        img.onload = () => {
-          console.log('Image loaded successfully');
-          console.log('Image dimensions:', img.width, 'x', img.height);
-          console.log('Container innerHTML after:', container.innerHTML);
-        };
-        img.onerror = (e) => {
-          console.error('Image load error:', e);
-          // Remove from cache and try again with live URL
-          delete cachedMediaUrls[item.media._id];
-          saveMediaCache();
-          
-          // Try with live URL directly
-          let liveUrl = item.media.fileUrl || '';
-          if (!liveUrl.startsWith('http')) {
-            const baseUrl = API_BASE.replace('/api/signage', '');
-            liveUrl = baseUrl + liveUrl;
-          }
-          img.src = liveUrl;
-          img.onerror = () => {
-            // Show error in container for debugging
-            container.innerHTML = `<div style="color: red; text-align: center;">Failed to load: ${mediaUrl}</div>`;
-            setTimeout(() => nextItem(), 2000);
-          };
-        };
+        img.style.transform = `rotate(${rotation}deg)`;
+        img.onerror = () => handleLoadError(img, false);
         container.appendChild(img);
         mediaTimer = setTimeout(() => nextItem(), duration * 1000);
       }
     }
+    playCurrentItem._token = 0;
     
     function nextItem() {
       if (mediaTimer) { clearTimeout(mediaTimer); mediaTimer = null; }
