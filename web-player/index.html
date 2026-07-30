@@ -82,10 +82,12 @@ html
     // ==================== STATE ====================
     let deviceId = null;
     let currentPlaylist = [];
+    let currentPlaylistId = null;
     let currentIndex = 0;
     let isPlaying = false;
     let pollTimer = null;
     let mediaTimer = null;
+    let videoFallbackTimer = null;
     let isOnline = true;
     let consecutiveFailures = 0;
 
@@ -226,12 +228,38 @@ html
           // Pre-cache media files
           preCacheMedia(pollData.playlist.items);
 
+          // Only treat this as a change (reset to item 0, restart playback) when
+          // the playlist actually differs from what's on screen — reassigning
+          // `currentPlaylist` on every single poll, even when unchanged, used to
+          // reset `currentIndex` back to 0 every ~30s, and a *real* change while
+          // something was already playing was never applied until the current
+          // item finished on its own — which, for a video whose `onended` never
+          // fires (a known flaky WebView/codec issue), could be never. An admin
+          // changing the assigned playlist should show up immediately instead of
+          // waiting on whatever happens to be on screen.
+          const isNewPlaylist = pollData.playlist._id !== currentPlaylistId;
           currentPlaylist = pollData.playlist.items;
-          currentIndex = 0;
           cachePlaylist(pollData.playlist);
-          if (!isPlaying) startPlayback();
+
+          if (!isPlaying) {
+            currentPlaylistId = pollData.playlist._id;
+            currentIndex = 0;
+            startPlayback();
+          } else if (isNewPlaylist) {
+            currentPlaylistId = pollData.playlist._id;
+            currentIndex = 0;
+            if (mediaTimer) { clearTimeout(mediaTimer); mediaTimer = null; }
+            if (videoFallbackTimer) { clearTimeout(videoFallbackTimer); videoFallbackTimer = null; }
+            playCurrentItem();
+          }
         } else {
-          // Paired but no playlist assigned - show message
+          // Paired but no playlist assigned (or unassigned) - show message, and
+          // reset playback state so a playlist assigned later is treated as new.
+          if (mediaTimer) { clearTimeout(mediaTimer); mediaTimer = null; }
+          if (videoFallbackTimer) { clearTimeout(videoFallbackTimer); videoFallbackTimer = null; }
+          isPlaying = false;
+          currentPlaylist = [];
+          currentPlaylistId = null;
           document.getElementById('player-screen').classList.add('active');
           document.getElementById('media-container').innerHTML = '<div style="color: #888; text-align: center;">No playlist assigned<br>Please assign a playlist in admin dashboard</div>';
         }
@@ -445,6 +473,16 @@ html
         video.loop = false;
         video.onended = () => nextItem();
         video.onerror = () => handleLoadError(video, true);
+        // Safety net: if `onended` never fires (seen on some WebView/codec
+        // combinations — the failure mode that used to leave a screen stuck
+        // on one video indefinitely, only fixable by a full reinstall), force
+        // playback to advance once the video's own reported duration has
+        // clearly elapsed, plus a buffer.
+        video.onloadedmetadata = () => {
+          if (video.duration && isFinite(video.duration)) {
+            videoFallbackTimer = setTimeout(() => nextItem(), (video.duration + 3) * 1000);
+          }
+        };
         container.appendChild(video);
       } else {
         const img = document.createElement('img');
@@ -462,6 +500,7 @@ html
     
     function nextItem() {
       if (mediaTimer) { clearTimeout(mediaTimer); mediaTimer = null; }
+      if (videoFallbackTimer) { clearTimeout(videoFallbackTimer); videoFallbackTimer = null; }
       currentIndex++;
       if (currentIndex >= currentPlaylist.length) currentIndex = 0;
       playCurrentItem();
