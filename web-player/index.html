@@ -188,6 +188,28 @@
       return false;
     }
 
+    // Fully tears down active playback — stopping timers alone (the old
+    // behavior) left a <video> element still running underneath the pairing
+    // overlay, since `display:none` doesn't pause HTML5 media, and the
+    // pending mediaTimer/videoFallbackTimer setTimeouts kept firing
+    // nextItem() regardless of what was on screen. This is why a deleted or
+    // unpaired device kept "playing" indefinitely on the physical TV even
+    // after it vanished from the admin dashboard.
+    function stopPlayback() {
+      if (mediaTimer) { clearTimeout(mediaTimer); mediaTimer = null; }
+      if (videoFallbackTimer) { clearTimeout(videoFallbackTimer); videoFallbackTimer = null; }
+      isPlaying = false;
+      currentPlaylist = [];
+      currentPlaylistId = null;
+      playCurrentItem._token++; // invalidate any in-flight playCurrentItem() awaiting a cache lookup
+      const container = document.getElementById('media-container');
+      if (container) {
+        const video = container.querySelector('video');
+        if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
+        container.innerHTML = '';
+      }
+    }
+
     async function pollBackend() {
       if (!deviceId) return;
 
@@ -216,6 +238,7 @@
             localStorage.removeItem(CACHE_KEY);
             deviceId = null;
             everPaired = false;
+            stopPlayback();
             await clearAllCachedMedia();
             // Show pairing screen
             document.getElementById('pairing-screen').classList.remove('hidden');
@@ -238,6 +261,7 @@
           // showing content — the playlist it had cached no longer applies.
           if (everPaired) {
             everPaired = false;
+            stopPlayback();
             await clearAllCachedMedia();
           }
           // Device is registered but not paired - show pairing screen with code
@@ -292,11 +316,7 @@
         } else {
           // Paired but no playlist assigned (or unassigned) - show message, and
           // reset playback state so a playlist assigned later is treated as new.
-          if (mediaTimer) { clearTimeout(mediaTimer); mediaTimer = null; }
-          if (videoFallbackTimer) { clearTimeout(videoFallbackTimer); videoFallbackTimer = null; }
-          isPlaying = false;
-          currentPlaylist = [];
-          currentPlaylistId = null;
+          stopPlayback();
           document.getElementById('player-screen').classList.add('active');
           document.getElementById('media-container').innerHTML = '<div style="color: #888; text-align: center;">No playlist assigned<br>Please assign a playlist in admin dashboard</div>';
         }
@@ -309,6 +329,19 @@
         consecutiveFailures++;
         if (consecutiveFailures >= OFFLINE_THRESHOLD) {
           setOnline(false);
+          // The offline indicator alone assumes there's already cached
+          // content to keep playing through — a device that's never
+          // successfully paired has nothing to fall back to, so this left
+          // it frozen on the static "------" placeholder with zero
+          // indication anything was wrong, indistinguishable from a
+          // healthy device still waiting to be paired.
+          if (!everPaired) {
+            document.getElementById('pairing-screen').classList.remove('hidden');
+            document.getElementById('player-screen').classList.remove('active');
+            document.getElementById('pairing-code-display').textContent = '···';
+            document.querySelector('.pairing-subtitle').textContent =
+              `Can't reach the server — retrying… (attempt ${consecutiveFailures})`;
+          }
         }
       } finally {
         scheduleNextPoll(nextDelay);
