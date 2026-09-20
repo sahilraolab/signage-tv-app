@@ -34,6 +34,8 @@
     }
     #offline-indicator.visible { display: block; }
 
+    #player-build { position: absolute; bottom: 16px; left: 0; right: 0; text-align: center; color: #555; font-size: 0.85rem; letter-spacing: 1px; }
+
     /* PORTRAIT ORIENTATION - rotate the fullscreen content 90deg to fit a
        portrait-mounted display while the OS/browser still renders landscape */
     body.orientation-portrait #pairing-screen,
@@ -53,6 +55,7 @@
     <div class="pairing-title">Pairing Code</div>
     <div class="pairing-code" id="pairing-code-display">------</div>
     <div class="pairing-subtitle">Enter this code in the admin dashboard</div>
+    <div id="player-build"></div>
   </div>
 
   <!-- PLAYER SCREEN -->
@@ -63,7 +66,29 @@
   <!-- OFFLINE INDICATOR -->
   <div id="offline-indicator">OFFLINE - Playing cached content</div>
 
+  <!-- Plain ES5 on purpose: this must still run on an old TV browser that cannot parse the main player script below,
+       so a broken player says why on screen instead of silently sitting on "------". -->
   <script>
+    (function () {
+      var m = navigator.userAgent.match(/Chrome\/(\d+)/);
+      var chrome = m ? m[1] : "?";
+      var build = document.getElementById("player-build");
+      if (build) build.textContent = "Player build 2026-09-20 \u00B7 Chrome " + chrome;
+      function say(text) {
+        var el = document.querySelector(".pairing-subtitle");
+        if (el) el.textContent = text;
+      }
+      window.onerror = function (message) {
+        if (!window.__playerBooted) say("Player error: " + message + " (Chrome " + chrome + ")");
+      };
+      setTimeout(function () {
+        if (!window.__playerBooted) say("The player could not start on this TV (Chrome " + chrome + "). Update Android System WebView.");
+      }, 8000);
+    })();
+  </script>
+
+  <script>
+    window.__playerBooted = true; // reached only if this whole script parsed
     // ==================== CONFIG ====================
     // Same-origin: the server serves this HTML file, so protocol+host already match the API.
     const getApiBase = () => `${window.location.protocol}//${window.location.host}/api/signage`;
@@ -279,7 +304,7 @@
         }
 
         everPaired = true;
-        applyOrientation(pollData.device?.orientation);
+        applyOrientation(pollData.device && pollData.device.orientation);
 
         // Device is paired - hide pairing screen and show player
         document.getElementById('pairing-screen').classList.add('hidden');
@@ -351,7 +376,7 @@
     // ==================== CACHE ====================
     function getCache() {
       try { return JSON.parse(localStorage.getItem(CACHE_KEY)) || { playlist: null }; }
-      catch { return { playlist: null }; }
+      catch (e) { return { playlist: null }; }
     }
     
     function saveCache(cache) {
